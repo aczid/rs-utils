@@ -1,4 +1,4 @@
-from xml.etree import cElementTree as ET
+import xml.etree.ElementTree as ET
 
 
 class AttrDict(dict):
@@ -44,13 +44,13 @@ def createXmlElem(name, o):
     if issubclass(type(o), dict):
         att = {}
         chi = {}
-        for k, v in o.iteritems():
+        for k, v in o.items():
             if k.startswith('@'):
                 att[k[1:]] = str(v)
             else:
                 chi[k] = v
         e = ET.Element(name, att)
-        for k, v in iter(sorted(chi.iteritems())):
+        for k, v in sorted(chi.items()):
             if type(v) is InlineContent:
                 for x in v:
                     e.append(createXmlElem(singular(k), x))
@@ -78,12 +78,12 @@ def json2xml(name, o):
 def createJsonElem(node, processor, notag):
     if node.text and node.text.strip():
         return processor(node.text.strip())
-    if ['count'] == node.attrib.keys() \
+    if list(node.attrib.keys()) == ['count'] \
             and len(node) == int(node.attrib['count']):
         return [createJsonElem(x, processor, notag) for x in node]
 
     d = {}
-    for tag, v in node.attrib.iteritems():
+    for tag, v in node.attrib.items():
         if notag:
             d[tag] = processor(v)
         else:

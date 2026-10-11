@@ -19,8 +19,8 @@ f = d1 + 'tab.xml'
 
 gp, mp3, sync = load_goplayalong(f)
 
-internalName = filter(str.isalnum, gp.Score.Artist)
-internalName += filter(str.isalnum, gp.Score.Title)
+internalName = ''.join(filter(str.isalnum, gp.Score.Artist))
+internalName += ''.join(filter(str.isalnum, gp.Score.Title))
 
 internal_name = internalName.lower()
 

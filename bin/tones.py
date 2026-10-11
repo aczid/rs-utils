@@ -30,7 +30,7 @@ def from_psarc(filename):
                 data = psarc.read_entry(stream, entry)
                 x = json.loads(data)
                 if 'Entries' in x:
-                    for k, v in x['Entries'].iteritems():
+                    for k, v in x['Entries'].items():
                         e = v['Attributes']
                         if 'Tones' in e:
                             uniq_append(tones, e['Tones'])
@@ -38,7 +38,7 @@ def from_psarc(filename):
                     y = x['Static']
                     if 'ToneManager' in y:
                         uniq_append(tones, y['ToneManager']['Tones'])
-            except:
+            except Exception:
                 continue
 
     return tones
@@ -68,4 +68,4 @@ if __name__ == '__main__':
         elif f.endswith('_prfldb'):
             tones += from_profile(f)
 
-    print json.dumps(tones, indent=2)
+    print(json.dumps(tones, indent=2))

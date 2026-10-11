@@ -40,7 +40,7 @@ class BnkGenerator:
 
         bkhd = struct.pack('<LL', 91, self.BANK_ID)
         # TODO padding function of CHUNK_SIZE
-        bkhd += 20 * chr(0)
+        bkhd += 20 * b'\0'
 
         return bkhd
 
@@ -58,21 +58,21 @@ class BnkGenerator:
         # TODO make this tidier and more readable
 
         sound = struct.pack('<LLLLL', self.SOUND_ID, PLUGIN_ID, 2, self.FILE_ID, self.FILE_ID)
-        sound += 3 * chr(0)
+        sound += 3 * b'\0'
         sound += struct.pack('<LL', self.BUS_ID, DIRECT_PARENT_ID)
         sound += struct.pack('<LL', UNK_ID * self.preview, MIXER_ID)
-        sound += 3 * chr(0) + chr(3) + chr(0) + chr(0x2e) + chr(0x2f)
+        sound += 3 * b'\0' + b'\x03\x00\x2e\x2f'
         sound += struct.pack('<fLL', self.volume, 1, 3)
-        sound += 6 * chr(0) + 2 * chr(self.preview) + chr(0)
+        sound += 6 * b'\0' + 2 * bytes([self.preview]) + b'\0'
         sound += struct.pack('<H', self.preview)
-        sound += 2 * chr(0) + chr(self.preview) + 11 * chr(0)
+        sound += 2 * b'\0' + bytes([self.preview]) + 11 * b'\0'
 
         mixer = struct.pack('<LHLLLL', MIXER_ID, 0, PARENT_BUS_ID, 0, 0, UNK_ID2)
-        mixer += 22 * chr(0)
+        mixer += 22 * b'\0'
         mixer += struct.pack('<HLL', 0, 1, self.SOUND_ID)
 
         action = struct.pack('<LHL', self.ACTION_ID, 0x403, self.SOUND_ID)
-        action += 3 * chr(0) + chr(4)
+        action += 3 * b'\0' + b'\x04'
         action += struct.pack('<L', self.BANK_ID)
 
         event = struct.pack('<LLL', hush(name), 1, self.ACTION_ID)
@@ -89,6 +89,7 @@ class BnkGenerator:
     def stringid(self, name):
         """StrindID section"""
 
+        name = name.encode('utf8')
         stid = struct.pack('<LLLB', 1, 1, self.BANK_ID, len(name))
         stid += name
         return stid
@@ -98,7 +99,7 @@ class BnkGenerator:
         """Build a soundbank for the given data chunk"""
 
         def section(section_name, content):
-            return section_name + struct.pack('<L', len(content)) + content
+            return section_name.encode('ascii') + struct.pack('<L', len(content)) + content
 
         suffix = '_Preview' if self.preview else ''
 

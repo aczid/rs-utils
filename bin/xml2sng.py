@@ -7,7 +7,7 @@ Usage: xml2sng.py FILE...
 """
 
 import binascii
-import md5
+import hashlib
 import json
 import random
 
@@ -15,6 +15,15 @@ from xmlhelpers import xml2json, AttrDict
 import sngparser
 
 MIDI_NOTES = [40, 45, 50, 55, 59, 64]
+
+# "none" value of the unsigned byte fields (wire 0xFF).
+NONE_BYTE = 0xFF
+
+
+def manifest_byte(v):
+    """Manifests write the byte-field "none" state as -1."""
+    return -1 if v == NONE_BYTE else v
+
 
 DNA_MAPPING = {
     'dna_none': 0,
@@ -72,18 +81,18 @@ def note_mask(note, single):
     mask |= NOTE_MASK_HAMMERON if note.hammerOn != 0 else 0
     mask |= NOTE_MASK_HARMONIC if note.harmonic != 0 else 0
     mask |= NOTE_MASK_IGNORE if single and note.ignore != 0 else 0
-    mask |= NOTE_MASK_LEFTHAND if single and note.leftHand != -1 else 0
+    mask |= NOTE_MASK_LEFTHAND if single and note.leftHand != NONE_BYTE else 0
     mask |= NOTE_MASK_MUTE if note.mute != 0 else 0
     mask |= NOTE_MASK_PALMMUTE if note.palmMute != 0 else 0
-    mask |= NOTE_MASK_PLUCK if note.pluck != -1 else 0
+    mask |= NOTE_MASK_PLUCK if note.pluck != NONE_BYTE else 0
     mask |= NOTE_MASK_PULLOFF if note.pullOff != 0 else 0
-    mask |= NOTE_MASK_SLAP if note.slap != -1 else 0
-    mask |= NOTE_MASK_SLIDE if note.slideTo != -1 else 0
+    mask |= NOTE_MASK_SLAP if note.slap != NONE_BYTE else 0
+    mask |= NOTE_MASK_SLIDE if note.slideTo != NONE_BYTE else 0
     mask |= NOTE_MASK_SUSTAIN if note.sustain != 0 else 0
     mask |= NOTE_MASK_TREMOLO if note.tremolo != 0 else 0
     mask |= NOTE_MASK_PINCHHARMONIC if note.harmonicPinch != 0 else 0
-    mask |= NOTE_MASK_RIGHTHAND if note.rightHand != -1 else 0
-    mask |= NOTE_MASK_SLIDEUNPITCHEDTO if note.slideUnpitchTo != -1 else 0
+    mask |= NOTE_MASK_RIGHTHAND if note.rightHand != NONE_BYTE else 0
+    mask |= NOTE_MASK_SLIDEUNPITCHEDTO if note.slideUnpitchTo != NONE_BYTE else 0
     mask |= NOTE_MASK_TAP if note.tap != 0 else 0
     mask |= NOTE_MASK_VIBRATO if note.vibrato != 0 else 0
     return mask
@@ -100,7 +109,7 @@ def phraseiteration(sng, time, include_end=False):
 def midi(sng, strg, fret):
     """Computes standard MIDI note value"""
 
-    if fret == -1:
+    if fret == NONE_BYTE:
         return -1
 
     base = MIDI_NOTES[strg] + sng.tuning['string' + str(strg)]
@@ -177,7 +186,7 @@ def process_sections(sng):
                 if s.startTime <= chord.time < s.endTime:
                     chordtemplate = sng.chordTemplates[chord.chordId]
                     for i in range(6):
-                        if chordtemplate['fret' + str(i)] > -1:
+                        if chordtemplate['fret' + str(i)] != NONE_BYTE:
                             mask |= 1 << i
             if mask == 0 and j < maxdifficulty:
                 mask = stringmask[j + 1]
@@ -187,8 +196,8 @@ def process_sections(sng):
 
 def process_note(sng, note, single=True):
     note['flags'] = 0
-    note['anchorFret'] = -1
-    note['anchorWidth'] = -1
+    note['anchorFret'] = NONE_BYTE
+    note['anchorWidth'] = NONE_BYTE
     note['chordId'] = -1
     note['chordNoteId'] = -1
     note['fingerPrintId'] = [-1, -1]
@@ -198,12 +207,14 @@ def process_note(sng, note, single=True):
     if not 'bendValues' in note:
         note['bendValues'] = []
     for bend in note.bendValues:
-        bend['UNK'] = 0
+        bend.setdefault('unk3', 0)
+        bend.setdefault('unk4', 0)
+        bend.setdefault('unk5', 0)
 
     note['phraseIterationId'] = phraseiteration(sng, note.time, False)
     note['phraseId'] = sng.phraseIterations[note.phraseIterationId].phraseId
     note['mask'] = note_mask(note, single)
-    note['hash'] = binascii.crc32(str(note.values()))
+    note['hash'] = binascii.crc32(str(note.values()).encode('utf8'))
 
 
 def process_chord_note(sng, chord):
@@ -215,8 +226,8 @@ def process_chord_note(sng, chord):
 
     technique = False
     mask = 6 * [0]
-    slideto = 6 * [-1]
-    slideunpitcho = 6 * [-1]
+    slideto = 6 * [NONE_BYTE]
+    slideunpitcho = 6 * [NONE_BYTE]
     vibrato = 6 * [0]
 
     # not using multiplicative notation (references...)
@@ -224,7 +235,9 @@ def process_chord_note(sng, chord):
         {'usedCount':  0,
          'bendValues': [AttrDict({'time': 0.0,
                                   'step': 0,
-                                  'UNK': 0}) for _ in range(32)]
+                                  'unk3': 0,
+                                  'unk4': 0,
+                                  'unk5': 0}) for _ in range(32)]
          }) for _ in range(6)]
 
     for n in chord.chordNote:
@@ -258,23 +271,23 @@ def process_chord(sng, chord):
         chord['chordNoteId'] = sng.chordNotes.index(cn)
     else:
         chord['chordNoteId'] = -1
-    chord['string'] = -1
-    chord['fret'] = -1
-    chord['anchorFret'] = -1
-    chord['anchorWidth'] = -1
+    chord['string'] = NONE_BYTE
+    chord['fret'] = NONE_BYTE
+    chord['anchorFret'] = NONE_BYTE
+    chord['anchorWidth'] = NONE_BYTE
     chord['fingerPrintId'] = [-1, -1]
     chord['prevIterNote'] = -1
     chord['parentPrevNote'] = -1
     chord['nextIterNote'] = -1
-    chord['slideTo'] = -1
-    chord['slideUnpitchTo'] = -1
-    chord['leftHand'] = -1
+    chord['slideTo'] = NONE_BYTE
+    chord['slideUnpitchTo'] = NONE_BYTE
+    chord['leftHand'] = NONE_BYTE
     chord['vibrato'] = 0
     chord['bend'] = 0
     chord['tap'] = 0
-    chord['pickDirection'] = -1
-    chord['slap'] = -1
-    chord['pluck'] = -1
+    chord['pickDirection'] = NONE_BYTE
+    chord['slap'] = NONE_BYTE
+    chord['pluck'] = NONE_BYTE
     chord['bendValues'] = []
 
     chord['phraseIterationId'] = phraseiteration(sng, chord.time, False)
@@ -286,7 +299,7 @@ def process_chord(sng, chord):
         chord['sustain'] = 0.0
 
     count = len([0 for k in range(6) if
-                sng.chordTemplates[chord.chordId]['fret' + str(k)] != -1])
+                sng.chordTemplates[chord.chordId]['fret' + str(k)] != NONE_BYTE])
 
     mask = NOTE_MASK_CHORD
     mask |= NOTE_MASK_CHORDNOTES if chord.chordNoteId > -1 else 0
@@ -300,7 +313,7 @@ def process_chord(sng, chord):
     mask |= NOTE_MASK_DOUBLESTOP if count == 2 else 0
     chord['mask'] = mask
 
-    chord['hash'] = binascii.crc32(str(chord.values()))
+    chord['hash'] = binascii.crc32(str(chord.values()).encode('utf8'))
 
 
 def process_level(sng, level):
@@ -324,9 +337,9 @@ def process_level(sng, level):
 
     def is_arpeggio(u):
         return sng.chordTemplates[u.chordId].mask & CHORD_MASK_ARPEGGIO
-    level.fingerPrints.append(filter(lambda x: not is_arpeggio(x),
-                                     level.handShapes))
-    level.fingerPrints.append(filter(is_arpeggio, level.handShapes))
+    level.fingerPrints.append(list(filter(lambda x: not is_arpeggio(x),
+                                          level.handShapes)))
+    level.fingerPrints.append(list(filter(is_arpeggio, level.handShapes)))
 
     for note in level.notes:
         process_note(sng, note)
@@ -406,10 +419,13 @@ def process_level(sng, level):
 
     level.anchorExtensions = []
     for note in level.notes:
-        if note.slideTo != -1:
+        if note.slideTo != NONE_BYTE:
             level.anchorExtensions.append(AttrDict({
                 'fret': note.slideTo,
                 'time': note.time + note.sustain,
+                'unk1': 0,
+                'unk2': 0,
+                'unk3': 0,
             }))
 
     level.notesInIterCount = len(sng.phraseIterations) * [0]
@@ -487,7 +503,7 @@ def process_metadata(sng):
         'pointsPerNote': 100000.0 / maxnotes if maxnotes > 0 else 0.0,
         'firstBeatLength': sng.ebeats[1].time - sng.ebeats[0].time,
         'startTime': sng.offset * -1.0,
-        'capo': sng.capo if sng.capo != 0 else -1,
+        'capo': sng.capo if sng.capo != 0 else NONE_BYTE,
         'lastConversionDateTime': sng.lastConversionDateTime,
         'part': sng.part,
         'songLength': sng.songLength,
@@ -567,7 +583,7 @@ def build_manifest(sng):
     fullname = sng.internalName + '_' + sng.arrangement
     urn_full = fullname.lower()
 
-    entry_id = md5.new(urn_full).hexdigest().upper()
+    entry_id = hashlib.md5(urn_full.encode('utf8')).hexdigest().upper()
 
     sng.arrangementProperties['routeMask'] = 0  # ROUTETYPE_MASK_UNDEFINED
     # ROUTETYPE_MASK_ANY = 8 ?
@@ -643,10 +659,12 @@ def build_manifest(sng):
         chordTemplates.append({
             'ChordId': idx,
             'ChordName': chord.chordName,
-            'Fingers': [chord.finger0, chord.finger1, chord.finger2,
-                        chord.finger3, chord.finger4, chord.finger5],
-            'Frets': [chord.fret0, chord.fret1, chord.fret2,
-                      chord.fret3, chord.fret4, chord.fret5]
+            'Fingers': [manifest_byte(v) for v in
+                        (chord.finger0, chord.finger1, chord.finger2,
+                         chord.finger3, chord.finger4, chord.finger5)],
+            'Frets': [manifest_byte(v) for v in
+                      (chord.fret0, chord.fret1, chord.fret2,
+                       chord.fret3, chord.fret4, chord.fret5)]
         })
 
     # TODO

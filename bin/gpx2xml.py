@@ -32,8 +32,7 @@ def get_prop(o, prop_name, default=None):
     clean_prop(o)
     for p in o.Properties.Property:
         if p['@name'] == prop_name:
-            u = p.keys()
-            u.remove('@name')
+            u = [k for k in p if k != '@name']
             return p[u[0]]
     return default
 
@@ -43,7 +42,7 @@ class Bar2Time:
         self.offset = offset
         self._X = []
         self._Y = []
-        for x, y in iter(sorted(mapping.iteritems())):
+        for x, y in sorted(mapping.items()):
             self._X.append(x)
             self._Y.append(y)
 
@@ -70,7 +69,7 @@ def load_gpx(filename):
         if y == x:
             t = x.split(' ')
             if len(t) > 0 and t[0] != DefaultConverter(t[0]):
-                return map(DefaultConverter, t)
+                return [DefaultConverter(v) for v in t]
         return y
 
     gp = xml2json(read_gp(filename), processor=process)
@@ -104,9 +103,9 @@ class BitReader:
     def read_bit(self):
         if self.position >= 8:
             x = self.stream.read(1)
-            if x == '':
-                x = '\x00'
-            self.current_byte = ord(x)
+            if x == b'':
+                x = b'\x00'
+            self.current_byte = x[0]
             self.position = 0
 
         value = (self.current_byte >> (8 - self.position - 1)) & 0x01
@@ -130,7 +129,6 @@ class BitReader:
 
 
 def filesystem(data):
-    from itertools import takewhile
 
     SECTOR_SIZE = 0x1000
 
@@ -143,8 +141,10 @@ def filesystem(data):
     offset = 0
     while offset + SECTOR_SIZE + 3 < len(data):
         if getint(offset) == 2:
-            content = ''
-            name = ''.join(takewhile(lambda x: ord(x) != 0, data[offset + 4:]))
+            content = b''
+            raw = data[offset + 4:]
+            nul = raw.find(b'\x00')
+            name = raw[:nul if nul > -1 else len(raw)].decode('latin1')
             size = getint(offset + 0x8c)
 
             blocks_offset = offset + 0x94
@@ -169,12 +169,12 @@ def read_gp(filename):
     data = open(filename, 'rb')
 
     header = data.read(4)
-    assert header == 'BCFZ'
+    assert header == b'BCFZ'
 
     expected_length = struct.unpack('<L', data.read(4))[0]
 
     io = BitReader(data)
-    result = []
+    result = bytearray()
 
     while len(result) < expected_length:
         flag = io.read_bit()
@@ -190,7 +190,7 @@ def read_gp(filename):
             for i in range(size):
                 result.append(io.read_byte())
 
-    uncompressed = ''.join(map(chr, result))
+    uncompressed = bytes(result)
 
     fs = filesystem(uncompressed)
     return fs['score.gpif']
@@ -200,4 +200,4 @@ if __name__ == '__main__':
     from docopt import docopt
     args = docopt(__doc__)
 
-    print read_gp(args['FILE'])
+    print(read_gp(args['FILE']).decode('utf8'))

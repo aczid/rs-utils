@@ -6,7 +6,17 @@ Manipulate PSARC archives used by Rocksmith 2014.
 Usage:
     psarc.py pack DIRECTORY...
     psarc.py unpack FILE...
-    psarc.py convert FILE...
+    psarc.py convert [--pc|--mac|--xbox|--ps3|--ps4] FILE...
+
+Options:
+    --pc    Convert to PC (Windows) archive: flags=4, PC_KEY sng, audio/windows
+    --mac   Convert to Mac archive: flags=4, MAC_KEY sng, audio/mac
+    --xbox  Convert to Xbox 360 archive: flags=0, big-endian plaintext sng,
+            audio/xbox360
+    --ps3   Convert to PS3 archive: flags=0, big-endian plaintext sng,
+            audio/ps3
+    --ps4   Convert to PS4 console archive: flags=0 (plaintext TOC and sng),
+            audio/generic
 """
 
 from Crypto.Cipher import AES
@@ -24,12 +34,13 @@ import codecs
 import sys
 print("psarc.py running on Python version %s.%s" % (sys.version_info.major,sys.version_info.minor))
 
-MAGIC = "PSAR"
+MAGIC = b'PSAR'
 VERSION = 65540
-COMPRESSION = "zlib"
+COMPRESSION = b'zlib'
 ARCHIVE_FLAGS = 4
 ENTRY_SIZE = 30
 BLOCK_SIZE = 65536
+
 
 ARC_KEY = 'C53DB23870A1A2F71CAE64061FDD0E1157309DC85204D4C5BFDF25090DF2572C'
 ARC_IV = 'E915AA018FEF71FC508132E4BB4CEB42'
@@ -72,7 +83,7 @@ def decrypt_profile(stream):
     s = stream.read()
     size = struct.unpack('<L', s[16:20])[0]
 
-    cipher = AES.new(codecs.decode(PRF_KEY,'hex'))
+    cipher = AES.new(codecs.decode(PRF_KEY,'hex'), AES.MODE_ECB)
     x = zlib.decompress(cipher.decrypt(pad(s[20:])))
     assert(size == len(x))
 
@@ -88,8 +99,11 @@ def stdout_same_line(line):
 def aes_ctr(data, key, ivector, encrypt=True):
     """AES CTR Mode"""
     output = bytes()
+    # Counter.new wants the nonce as an int; callers pass 16 raw bytes.
+    if isinstance(ivector, (bytes, bytearray)):
+        ivector = int(codecs.encode(ivector, 'hex'), 16)
     #First param: Number of bits of the cipher. 64 is not meaningful.
-    ctr = Counter.new(64, initial_value = ivector)
+    ctr = Counter.new(128, initial_value = ivector)
     cipher = AES.new(codecs.decode(key,'hex'), mode=AES.MODE_CTR, counter=ctr)
 
     if encrypt:
@@ -132,20 +146,29 @@ def encrypt_sng(data, key):
     return output + bytes(56)
 
 
+def wrap_sng_console(data, endian='<'):
+    """Wrap a track payload in the plaintext '4a' container used by
+    console (flags == 0) archives: u32 magic, u32 version, u32 size,
+    followed by a zlib stream. X360/PS3 store the header big-endian."""
+    out = struct.pack(endian + 'LLL', 0x4a, 1, len(data))
+    out += zlib.compress(data, zlib.Z_BEST_COMPRESSION)
+    return out
+
+
 def decrypt_config(data):
     """For pkgconfig.ini"""
     data = data[:-56]  # remove signature
 
-    cipher = AES.new(codecs.decode(CONFIG_KEY,'hex'))
+    cipher = AES.new(codecs.decode(CONFIG_KEY,'hex'), AES.MODE_ECB)
     t = cipher.decrypt(data)
-    if t.find('\x00') > -1:  # padding was applied
-        return t[:t.index('\x00')]
+    if t.find(b'\x00') > -1:  # padding was applied
+        return t[:t.index(b'\x00')]
     return t
 
 
 def encrypt_config(data):
     """For pkgconfig.ini"""
-    cipher = AES.new(codecs.decode(CONFIG_KEY,'hex'))
+    cipher = AES.new(codecs.decode(CONFIG_KEY,'hex'), AES.MODE_ECB)
     t = cipher.encrypt(pad(data))
     t += bytes(56)
     return t
@@ -162,7 +185,9 @@ def read_entry(filestream, entry):
     i = 0
     while len(data) < length:
         if zlength[i] == 0:
-            data += filestream.read(BLOCK_SIZE)
+            # Stored block: 0 marks uncompressed. The final block of a file
+            # is partial, so never read past the declared entry length.
+            data += filestream.read(min(BLOCK_SIZE, length - len(data)))
         else:
             chunk = filestream.read(zlength[i])
             try:
@@ -171,11 +196,23 @@ def read_entry(filestream, entry):
                 data += chunk
         i += 1
 
+    flags = entry.get('flags', ARCHIVE_FLAGS)
+    # sng post-processing: PC/Mac wrap the '4a' container in AES-CTR;
+    # console archives (flags == 0) store it in the clear.
+    if flags != 0:
     # Post process for sng
-    if entry['filepath'].find('songs/bin/macos/') > -1:
-        data = decrypt_sng(data, MAC_KEY)
-    elif entry['filepath'].find('songs/bin/generic/') > -1:
-        data = decrypt_sng(data, PC_KEY)
+        if entry['filepath'].find('songs/bin/macos/') > -1:
+            data = decrypt_sng(data, MAC_KEY)
+        elif entry['filepath'].find('songs/bin/generic/') > -1:
+            data = decrypt_sng(data, PC_KEY)
+    elif entry['filepath'].find('songs/bin/') > -1 and data[:4] in (b'\x4a\x00\x00\x00', b'\x00\x00\x00\x4a'):
+        # Unwrap the plaintext '4a' container (see wrap_sng_console);
+        # X360/PS3 archives store it big-endian.
+        endian = '<' if data[0] == 0x4a else '>'
+        length = struct.unpack(endian + 'L', data[8:12])[0]
+        payload = zlib.decompressobj().decompress(data[12:])
+        assert len(payload) == length
+        data = payload
 
     # Requires bypass for ini
     # if entry['filepath'] == 'pkgconfig.ini':
@@ -184,21 +221,24 @@ def read_entry(filestream, entry):
     return data
 
 
-def create_entry(name, data):
+def create_entry(name, data, flags=ARCHIVE_FLAGS, endian='<'):
     """Chunk a file"""
 
     # Pre process for sng
-    if name.find('songs/bin/macos/') > -1:
-        data = encrypt_sng(data, MAC_KEY)
-    elif name.find('songs/bin/generic/') > -1:
-        data = encrypt_sng(data, PC_KEY)
+    if name.find('songs/bin/') > -1:
+        if flags == 0:
+            data = wrap_sng_console(data, endian)
+        elif name.find('songs/bin/macos/') > -1:
+            data = encrypt_sng(data, MAC_KEY)
+        elif name.find('songs/bin/generic/') > -1:
+            data = encrypt_sng(data, PC_KEY)
 
     # Requires bypass for ini
     # if name == 'pkgconfig.ini':
     #     data = encrypt_config(data)
 
     zlength = []
-    output = ''
+    output = b''
 
     i = 0
     while i < len(data):
@@ -211,14 +251,14 @@ def create_entry(name, data):
             zlength.append(len(compressed))
         else:
             output += raw
-            zlength.append(len(raw) % BLOCK_SIZE)
+            zlength.append(len(raw) if len(raw) < BLOCK_SIZE else 0)
 
     return {
         'filepath': name,
         'zlength': zlength,
         'length': len(data),
         'data': output,
-        'md5': md5.new(name).digest() if name != '' else bytes(16)
+        'md5': hashlib.md5(name.encode()).digest() if name != '' else bytes(16)
     }
 
 
@@ -230,7 +270,9 @@ def cipher_toc():
 
 def read_toc(filestream):
     """Read entry list and Z-fragments.
-    Returns a list of entries to be used with read_entry."""
+    Returns a list of entries to be used with read_entry. Each entry
+    carries the archive's flags byte; flags == 0 means plaintext TOC
+    and plaintext sng containers."""
 
     entries = []
     zlength = []
@@ -238,9 +280,12 @@ def read_toc(filestream):
     filestream.seek(0)
     header = struct.unpack('>4sL4sLLLLL', filestream.read(32))
 
+    flags = header[7] & 0xFF
     toc_size = header[3] - 32
     n_entries = header[5]
-    toc = cipher_toc().decrypt(pad(filestream.read(toc_size)))
+    toc = filestream.read(toc_size)
+    if flags != 0:
+        toc = cipher_toc().decrypt(pad(toc))
     toc_position = 0
 
     idx = 0
@@ -251,7 +296,8 @@ def read_toc(filestream):
             'md5': data[:16],
             'zindex': struct.unpack('>L', data[16:20])[0],
             'length': struct.unpack('>Q', b'\x00'*3 + data[20:25])[0],
-            'offset': struct.unpack('>Q', b'\x00'*3 + data[25:])[0]
+            'offset': struct.unpack('>Q', b'\x00'*3 + data[25:])[0],
+            'flags': flags
         })
         toc_position += ENTRY_SIZE
         idx += 1
@@ -275,8 +321,8 @@ def read_toc(filestream):
     return entries[1:]
 
 
-def create_toc(entries):
-    """Build an encrypted TOC for a given list of entries."""
+def create_toc(entries, flags=ARCHIVE_FLAGS):
+    """Build a TOC (encrypted iff flags != 0) for a given list of entries."""
 
     offset = 0
     zindex = 0
@@ -294,9 +340,9 @@ def create_toc(entries):
 
     header = struct.pack('>4sL4sLLLLL', MAGIC, VERSION, COMPRESSION,
                          toc_size, ENTRY_SIZE, len(entries),
-                         BLOCK_SIZE, ARCHIVE_FLAGS)
+                         BLOCK_SIZE, flags)
 
-    toc = ''
+    toc = b''
     for entry in entries:
         toc += entry['md5']
         toc += struct.pack('>L', entry['zindex'])
@@ -306,6 +352,8 @@ def create_toc(entries):
     for i in zlength:
         toc += struct.pack('>H', i)
 
+    if flags == 0:
+        return header + toc
     # the [:toc_size] seems a little odd, but padding is not applied
     # in official PSARC either
     return (header + cipher_toc().encrypt(pad(toc)))[:toc_size]
@@ -330,62 +378,122 @@ def extract_psarc(filename):
                 fstream.write(data)
 
 
-def create_psarc(files, filename):
+def create_psarc(files, filename, flags=ARCHIVE_FLAGS, endian='<'):
     """Writes a dictionary filepath -> data to a PSARC file"""
     # Order is reversed
     filenames = reversed(sorted(files.keys()))
-    entries = [create_entry('', '\n'.join(filenames))]
+    entries = [create_entry('', '\n'.join(filenames).encode(), flags)]
 
     logmsg = 'Creating ' + filename + ' {0}/' + str(len(files))
     for idx, (name, data) in enumerate(reversed(sorted(files.items()))):
         stdout_same_line(logmsg.format(idx + 1))
-        entries.append(create_entry(name, data))
+        entries.append(create_entry(name, data, flags, endian))
 
     with open(filename, 'wb') as fstream:
-        fstream.write(create_toc(entries))
+        fstream.write(create_toc(entries, flags))
         for entry in entries:
             fstream.write(entry['data'])
 
 
-def change_path(data, osx2pc):
-    """Changing path"""
-    if osx2pc:
-        data = data.replace('audio/mac', 'audio/windows')
-        data = data.replace('bin/macos', 'bin/generic')
-    else:
-        data = data.replace('audio/windows', 'audio/mac')
-        data = data.replace('bin/generic', 'bin/macos')
-    return data
+# Per-platform archive differences.
+PLATFORMS = {
+    'pc':  {'audio': 'audio/windows', 'bin': 'songs/bin/generic',
+            'flags': ARCHIVE_FLAGS, 'token': 'dx9', 'suffix': '_p'},
+    'mac': {'audio': 'audio/mac', 'bin': 'songs/bin/macos',
+            'flags': ARCHIVE_FLAGS, 'token': 'macos', 'suffix': '_m'},
+    'xbox': {'audio': 'audio/xbox360', 'bin': 'songs/bin/xbox360',
+             'flags': 0, 'token': 'xbox360', 'suffix': '_xbox', 'be': True},
+    'ps3': {'audio': 'audio/ps3', 'bin': 'songs/bin/ps3',
+            'flags': 0, 'token': 'ps3', 'suffix': '_ps3', 'be': True},
+    'ps4': {'audio': 'audio/generic', 'bin': 'songs/bin/generic',
+            'flags': 0, 'token': 'dx9', 'suffix': '_ps4'},
+}
+
+_AUDIO_DIRS = [p['audio'] for p in PLATFORMS.values()]
+_BIN_DIRS = [p['bin'] for p in PLATFORMS.values()]
+
+
+def detect_platform(entries):
+    """Infer the platform a loaded archive was built for."""
+    names = [entry['filepath'] for entry in entries]
+    flags = entries[0]['flags'] if entries else ARCHIVE_FLAGS
+    if any('bin/xbox360/' in n for n in names):
+        return 'xbox'
+    if any('bin/ps3/' in n for n in names):
+        return 'ps3'
+    if flags == 0:
+        return 'ps4'
+    if any('bin/macos/' in n for n in names):
+        return 'mac'
+    return 'pc'
+
+
+def _map_path(name, src, dst):
+    """Rewrite platform-specific directories inside an entry path."""
+    if name.startswith(src['audio'] + '/'):
+        name = dst['audio'] + '/' + name[len(src['audio']) + 1:]
+    if name.startswith(src['bin'] + '/'):
+        name = dst['bin'] + '/' + name[len(src['bin']) + 1:]
+    # tolerate archives carrying another platform's dirs
+    for other in _AUDIO_DIRS:
+        if other != src['audio'] and name.startswith(other + '/'):
+            name = dst['audio'] + '/' + name[len(other) + 1:]
+    for other in _BIN_DIRS:
+        if other != src['bin'] and name.startswith(other + '/'):
+            name = dst['bin'] + '/' + name[len(other) + 1:]
+    return name
 
 
 # TODO logic for converting needs cleanup
-def convert(filename):
-    """Convert between PC and Mac PSARC"""
+def convert(filename, target=None):
+    """Convert a PSARC between platforms (pc, mac, xbox, ps3, ps4).
+
+    Differences handled: TOC encryption (flags 4 vs 0), the sng wrapper
+    (PC_KEY / MAC_KEY CTR vs plaintext '4a' container, big-endian on
+    X360/PS3), audio/bin entry directories, and the platform token
+    inside aggregategraph.nt.
+
+    Caveat: track chart data is byte-compatible across PC, Mac and PS4
+    only. Converting to/from X360/PS3 rewrites container, paths and
+    graph tokens; re-serializing the big-endian charts and building
+    the audio banks are out of scope.
+
+    With no target flag the classic pairing applies: _p <-> _m,
+    console archives convert to PC. Output is <base><suffix>.psarc."""
     content = {}
-
-    osx2pc = False
-    outname = filename
-    if filename.endswith('_m.psarc'):
-        outname = filename.replace('_m.psarc', '_p.psarc')
-        osx2pc = True
-    else:
-        outname = filename.replace('_p.psarc', '_m.psarc')
-
     with open(filename, 'rb') as psarc:
         entries = read_toc(psarc)
-        for entry in entries:
-            data = read_entry(psarc, entry)
+        src_name = detect_platform(entries)
+        files = [(entry['filepath'], read_entry(psarc, entry))
+                 for entry in entries]
 
-            if entry['filepath'].endswith('aggregategraph.nt'):
-                data = change_path(data, osx2pc)
-                if osx2pc:
-                    data = data.replace('macos', 'dx9')
-                else:
-                    data = data.replace('dx9', 'macos')
+    if target is None:
+        target = {'pc': 'mac', 'mac': 'pc', 'xbox': 'pc',
+                  'ps3': 'pc', 'ps4': 'pc'}[src_name]
+    src, dst = PLATFORMS[src_name], PLATFORMS[target]
 
-            content[change_path(entry['filepath'], osx2pc)] = data
+    for name, data in files:
+        name = _map_path(name, src, dst)
+        if name.endswith('aggregategraph.nt'):
+            for other in _AUDIO_DIRS:
+                if other != dst['audio']:
+                    data = data.replace(other.encode(), dst['audio'].encode())
+            for other in _BIN_DIRS:
+                if other != dst['bin']:
+                    data = data.replace(other.encode(), dst['bin'].encode())
+            if src['token'] != dst['token']:
+                data = data.replace(src['token'].encode(), dst['token'].encode())
+        content[name] = data
 
-    create_psarc(content, outname)
+    base = filename[:-6] if filename.endswith('.psarc') else filename
+    for suffix in [p['suffix'] for p in PLATFORMS.values()]:
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    outname = base + dst['suffix'] + '.psarc'
+    create_psarc(content, outname, flags=dst['flags'],
+                 endian='>' if dst.get('be') else '<')
+    return outname
 
 
 if __name__ == '__main__':
@@ -400,5 +508,10 @@ if __name__ == '__main__':
             d = os.path.normpath(d)
             create_psarc(path2dict(d), d + '.psarc')
     elif args['convert']:
+        target = ('pc' if args['--pc'] else
+                  'mac' if args['--mac'] else
+                  'xbox' if args['--xbox'] else
+                  'ps3' if args['--ps3'] else
+                  'ps4' if args['--ps4'] else None)
         for f in args['FILE']:
-            convert(f)
+            convert(f, target)

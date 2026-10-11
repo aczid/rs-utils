@@ -29,6 +29,10 @@ DURATIONS = {
     '256th': 1.0 / 64.0,
 }
 
+# "none" value of the unsigned byte fields (wire 0xFF). The chord
+# database and Guitar Pro input use -1 for the same state.
+NONE_BYTE = 0xFF
+
 
 def text_for_sort(text):
     x = re.sub(r'(a|an|the)(\s+)', '', text, flags=re.IGNORECASE)
@@ -42,6 +46,7 @@ CH_TEMPLATES = CH_TEMPLATES['Static']['Chords']['Entries']
 # TODO: make the logic clearer :)
 def find_fingering(chord):
     f0 = [chord['@fret' + str(k)] for k in range(6)]
+    f0 = [-1 if x == NONE_BYTE else x for x in f0]
     mask = [x > -1 for x in f0]
     f = f0
     min_fret = min([x for x in f if x > -1])
@@ -56,7 +61,7 @@ def find_fingering(chord):
             break
 
     if w:
-        k = [-1 if not y else x for x, y in zip(c['Fingers'], mask)]
+        k = [NONE_BYTE if not y else x for x, y in zip(c['Fingers'], mask)]
         for kk in range(6):
             chord['@finger' + str(kk)] = k[kk]
             # print chord
@@ -113,8 +118,8 @@ class SngBuilder:
     def json(self):
         score = self.song.Score
 
-        internalName = filter(str.isalnum, score.Artist)
-        internalName += filter(str.isalnum, score.Title)
+        internalName = ''.join(filter(str.isalnum, score.Artist))
+        internalName += ''.join(filter(str.isalnum, score.Title))
         part = 1  # TODO
 
         centOffset = 0  # No cent offset in GPX ?
@@ -157,15 +162,15 @@ class SngBuilder:
             '@pinchHarmonics': xany(self.notes, '@harmonicPinch'),
             '@powerChords': 0,
             '@represent': 1,
-            '@slapPop': int(any(n['@slap'] != -1 or n['@pluck'] != -1 for n in self.notes)),
-            '@slides': int(any(n['@slideTo'] != -1 for n in self.notes)),
+            '@slapPop': int(any(n['@slap'] != NONE_BYTE or n['@pluck'] != NONE_BYTE for n in self.notes)),
+            '@slides': int(any(n['@slideTo'] != NONE_BYTE for n in self.notes)),
             '@standardTuning': standardTuning,
             '@sustain': xany(self.notes, '@sustain'),
             '@syncopation': 0,
             '@tapping': xany(self.notes, '@tap'),
             '@tremolo': xany(self.notes, '@tremolo'),
             '@twoFingerPicking': 0,
-            '@unpitchedSlides': int(any(n['@slideUnpitchTo'] != -1 for n in self.notes)),
+            '@unpitchedSlides': int(any(n['@slideUnpitchTo'] != NONE_BYTE for n in self.notes)),
             '@vibrato': xany(self.notes, '@vibrato')
         }
 
@@ -231,10 +236,10 @@ class SngBuilder:
         chordTemplate = {
             '@chordName': '',  # TODO
             '@displayName': '',  # TODO
-            '@finger0': -1, '@finger1': -1, '@finger2': -1,
-            '@finger3': -1, '@finger4': -1, '@finger5': -1,
-            '@fret0': -1, '@fret1': -1, '@fret2': -1,
-            '@fret3': -1, '@fret4': -1, '@fret5': -1
+            '@finger0': NONE_BYTE, '@finger1': NONE_BYTE, '@finger2': NONE_BYTE,
+            '@finger3': NONE_BYTE, '@finger4': NONE_BYTE, '@finger5': NONE_BYTE,
+            '@fret0': NONE_BYTE, '@fret1': NONE_BYTE, '@fret2': NONE_BYTE,
+            '@fret3': NONE_BYTE, '@fret4': NONE_BYTE, '@fret5': NONE_BYTE
         }
         for n in notes:
             string, fret = n['@string'], n['@fret']
@@ -261,7 +266,7 @@ class SngBuilder:
             '@startTime': self.time
         })
 
-        lowest_fret = [n['@fret'] for n in notes if n['@fret'] > -1]
+        lowest_fret = [n['@fret'] for n in notes if n['@fret'] != NONE_BYTE]
         if lowest_fret != []:
             lowest_fret = min(lowest_fret)
             self.anchors.append({
@@ -303,26 +308,27 @@ class SngBuilder:
 
             harmonic = get_prop(note, 'HarmonicType')
 
+            fret = int(get_prop(note, 'Fret'))
             ns.append({
                 '@accent': int('Accent' in note),
                 '@bend': 0,
-                '@fret': get_prop(note, 'Fret'),
+                '@fret': fret if fret != -1 else NONE_BYTE,
                 '@hammerOn': 0,
                 '@harmonic': int(harmonic == 'Artificial'),
                 '@harmonicPinch': int(harmonic == 'Pinch'),
                 '@hopo': 0,
                 '@ignore': 0,
-                '@leftHand': -1,
+                '@leftHand': NONE_BYTE,
                 '@linkNext': int('Tie' in note and note.Tie['@origin']),
                 '@mute': int(has_prop(note, 'Muted')),
                 '@palmMute': int(has_prop(note, 'PalmMuted')),
                 '@pickDirection': 0,
-                '@pluck': -1,  # int(has_prop(beat, 'Popped')),
+                '@pluck': NONE_BYTE,  # int(has_prop(beat, 'Popped')),
                 '@pullOff': 0,
-                '@rightHand': -1,
-                '@slap': -1,  # int(has_prop(beat, 'Slapped')),
-                '@slideTo': -1,
-                '@slideUnpitchTo': -1,
+                '@rightHand': NONE_BYTE,
+                '@slap': NONE_BYTE,  # int(has_prop(beat, 'Slapped')),
+                '@slideTo': NONE_BYTE,
+                '@slideUnpitchTo': NONE_BYTE,
                 '@string': get_prop(note, 'String'),
                 '@sustain': 0.0,
                 '@tap': int(has_prop(note, 'Tapped')),
@@ -441,4 +447,4 @@ if __name__ == '__main__':
     sng = SngBuilder(gp, gp.Tracks[0], sync)
 
     x = json2xml('song', sng.run())
-    print parseString(x).toprettyxml()
+    print(parseString(x).toprettyxml())

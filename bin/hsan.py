@@ -62,7 +62,7 @@ def hsan(manifests):
     name = ''
 
     for manifest in manifests:
-        for persistent_id, e in manifest['Entries'].iteritems():
+        for persistent_id, e in manifest['Entries'].items():
             entry = e['Attributes']
 
             entry['name'] = entry['DLCKey'].lower()
